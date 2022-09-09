@@ -34,10 +34,11 @@ func Process(n []Node, workers int) {
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
-		go func() {
+		go func(i int) {
 			worker(context.Background(), vertexC)
 			wg.Done()
-		}()
+			fmt.Printf("worker %d exited\n", i)
+		}(i)
 	}
 	wg.Wait()
 }
@@ -57,6 +58,7 @@ func worker(ctx context.Context, vertexC <-chan *vertex) {
 			if !more {
 				return
 			}
+			fmt.Println("waiting on dependencies", vertex.n.ID())
 			vertex.wg.Wait()
 			fmt.Println("start:", vertex.n.ID())
 			if err := vertex.n.Do(); err != nil {
