@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"time"
 
 	"github.com/rusq/dagproc"
@@ -39,5 +40,7 @@ func main() {
 		Node{id: "7", delay: 1, parentIDs: []string{"1", "3", "8"}},
 		Node{id: "8", delay: 1, parentIDs: []string{"5", "6"}},
 	}
-	dagproc.Process(nodes, 4)
+	if err := dagproc.Process(nodes, 4); err != nil {
+		log.Fatal(err)
+	}
 }

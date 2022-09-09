@@ -2,6 +2,7 @@ package dagproc
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -15,8 +16,11 @@ type Node interface {
 	Do() error
 }
 
-func Process(n []Node, workers int) {
-	g := NewGraph(n)
+func Process(n []Node, workers int) error {
+	g, err := NewGraph(n)
+	if err != nil {
+		return err
+	}
 	order, ok := graph.TopSort(g.g)
 	if !ok {
 		log.Fatal("poop")
@@ -41,6 +45,7 @@ func Process(n []Node, workers int) {
 		}(i)
 	}
 	wg.Wait()
+	return nil
 }
 
 type vertex struct {
@@ -77,7 +82,7 @@ type Graph struct {
 	g *graph.Mutable
 }
 
-func NewGraph(nodes []Node) Graph {
+func NewGraph(nodes []Node) (Graph, error) {
 	var idx = make(map[string]int, len(nodes))
 	for i := range nodes {
 		idx[nodes[i].ID()] = i
@@ -98,5 +103,8 @@ func NewGraph(nodes []Node) Graph {
 			vertices[idxPar].children = append(vertices[idxPar].children, &vertices[i])
 		}
 	}
-	return Graph{v: vertices, g: g}
+	if !graph.Acyclic(g) {
+		return Graph{}, errors.New("graph is not acyclic")
+	}
+	return Graph{v: vertices, g: g}, nil
 }
