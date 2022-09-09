@@ -51,8 +51,6 @@ func main() {
 
 type Node struct {
 	ID        string
-	Visited   bool
-	Finished  bool
 	Delay     int
 	ParentIDs []string
 
@@ -95,58 +93,11 @@ func NewGraph(nodes []Node) Graph {
 	for i := range nodes {
 		fmt.Printf("node %d has %d parents\n", i, len(nodes[i].ParentIDs))
 		nodes[i].wg.Add(len(nodes[i].ParentIDs))
-		for _, depID := range nodes[i].ParentIDs {
-			depIdx := idx[depID]
-			g.Add(depIdx, i)
-			nodes[depIdx].children = append(nodes[depIdx].children, &nodes[i])
+		for _, parID := range nodes[i].ParentIDs {
+			idxPar := idx[parID]
+			g.Add(idxPar, i)
+			nodes[idxPar].children = append(nodes[idxPar].children, &nodes[i])
 		}
 	}
-	return Graph{g: g, Nodes: nodes}
-}
-
-func graphtest() {
-	g := graph.New(9)
-	g.AddCost(0, 1, 1)
-	g.AddCost(1, 2, 1)
-	g.AddCost(1, 3, 4)
-	g.AddCost(1, 7, 1)
-	g.AddCost(3, 6, 1)
-	g.AddCost(3, 7, 1)
-	g.AddCost(2, 4, 1)
-	g.AddCost(2, 6, 1)
-	g.AddCost(6, 8, 2)
-	g.AddCost(4, 5, 1)
-	g.AddCost(5, 8, 1)
-	g.AddCost(8, 7, 1)
-
-	if !graph.Acyclic(g) {
-		log.Fatal("cyclic graph")
-	}
-	fmt.Println(graph.String(g))
-
-	fmt.Println("** BFS **")
-	var i = 0
-	graph.BFS(g, 0, func(v, w int, c int64) {
-		fmt.Printf("%d: v=%d, w=%d, c=%d\n", i, v, w, c)
-		i++
-	})
-
-	fmt.Println("** Components **: ", graph.Components(g))
-
-	fmt.Println("** MST **")
-	enumerate(graph.MST(g))
-
-	fmt.Println("** Sorted **")
-	sg := graph.Sort(g)
-	fmt.Println(sg.String())
-
-	fmt.Println("** TopSort **:")
-	fmt.Println(graph.TopSort(g))
-
-}
-
-func enumerate(a []int) {
-	for i, v := range a {
-		fmt.Printf("%d: %d\n", i, v)
-	}
+	return Graph{Nodes: nodes, g: g}
 }
