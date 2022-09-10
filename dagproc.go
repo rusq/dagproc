@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"strconv"
 	"sync"
 
 	"github.com/yourbasic/graph"
@@ -14,6 +16,38 @@ type Node interface {
 	ID() string
 	ParentIDs() []string
 	Do() error
+}
+
+type Graph struct {
+	v []vertex
+	g *graph.Mutable
+}
+
+func NewGraph(nodes []Node) (Graph, error) {
+	var (
+		idx      = make(map[string]int, len(nodes))
+		vertices = make([]vertex, len(nodes))
+	)
+	for i := range nodes {
+		idx[nodes[i].ID()] = i
+		vertices[i] = vertex{
+			n: nodes[i],
+		}
+	}
+	// add vertex edges
+	g := graph.New(len(nodes))
+	for i := range nodes {
+		for _, parID := range nodes[i].ParentIDs() {
+			idxPar := idx[parID]
+			g.Add(idxPar, i)
+			vertices[idxPar].children = append(vertices[idxPar].children, &vertices[i])
+		}
+		vertices[i].setParentCount(len(nodes[i].ParentIDs()))
+	}
+	if !graph.Acyclic(g) {
+		return Graph{}, errors.New("graph is not acyclic")
+	}
+	return Graph{v: vertices, g: g}, nil
 }
 
 func Process(n []Node, workers int) error {
@@ -39,7 +73,7 @@ func Process(n []Node, workers int) error {
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go func(i int) {
-			worker(context.Background(), vertexC)
+			worker(context.Background(), i, vertexC)
 			wg.Done()
 			fmt.Printf("worker %d exited\n", i)
 		}(i)
@@ -54,7 +88,18 @@ type vertex struct {
 	children []*vertex      // addresses of all child nodes
 }
 
-func worker(ctx context.Context, vertexC <-chan *vertex) {
+func (v *vertex) setParentCount(n int) {
+	log.Printf("node %s: set parent count: %d", v.n.ID(), n)
+	v.wg.Add(n)
+}
+
+func (v *vertex) reportOK(id string) {
+	log.Printf("node %s: parent %s reported OK", v.n.ID(), id)
+	v.wg.Done()
+}
+
+func worker(ctx context.Context, id int, vertexC <-chan *vertex) {
+	lg := log.New(os.Stdout, "worker "+strconv.Itoa(id)+": ", log.LstdFlags)
 	for {
 		select {
 		case <-ctx.Done():
@@ -63,48 +108,17 @@ func worker(ctx context.Context, vertexC <-chan *vertex) {
 			if !more {
 				return
 			}
-			fmt.Println("waiting on dependencies", vertex.n.ID())
+			lg.Println("waiting on dependencies", vertex.n.ID())
 			vertex.wg.Wait()
-			fmt.Println("start:", vertex.n.ID())
+			lg.Println("start:", vertex.n.ID(), "num children:", len(vertex.children))
 			if err := vertex.n.Do(); err != nil {
 				log.Printf("node: %s, error: %s", vertex.n.ID(), err)
 			}
-			fmt.Println("finish:", vertex.n.ID())
+			lg.Println("finish:", vertex.n.ID())
 			for i := range vertex.children {
-				vertex.children[i].wg.Done() // mark this prerequisite as done
+				lg.Printf("notify %s that vertex %s is done", vertex.children[i].n.ID(), vertex.n.ID())
+				vertex.children[i].reportOK(vertex.n.ID()) // mark this prerequisite as done
 			}
 		}
 	}
-}
-
-type Graph struct {
-	v []vertex
-	g *graph.Mutable
-}
-
-func NewGraph(nodes []Node) (Graph, error) {
-	var idx = make(map[string]int, len(nodes))
-	for i := range nodes {
-		idx[nodes[i].ID()] = i
-	}
-
-	var vertices = make([]vertex, len(nodes))
-
-	g := graph.New(len(nodes))
-	for i := range nodes {
-		vertices[i] = vertex{
-			n: nodes[i],
-		}
-		fmt.Printf("node %d has %d parents\n", i, len(nodes[i].ParentIDs()))
-		vertices[i].wg.Add(len(nodes[i].ParentIDs()))
-		for _, parID := range nodes[i].ParentIDs() {
-			idxPar := idx[parID]
-			g.Add(idxPar, i)
-			vertices[idxPar].children = append(vertices[idxPar].children, &vertices[i])
-		}
-	}
-	if !graph.Acyclic(g) {
-		return Graph{}, errors.New("graph is not acyclic")
-	}
-	return Graph{v: vertices, g: g}, nil
 }
