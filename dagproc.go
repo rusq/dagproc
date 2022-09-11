@@ -4,121 +4,156 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
-	"os"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/rusq/dlog"
 	"github.com/yourbasic/graph"
 )
 
+// defNumWorkers is the default number of workers if caller requests 0 workers.
+const defNumWorkers = 1
+
+// A Node is a basic building block of a pipeline.
 type Node interface {
+	// ID should return an ID, i.e. "3".  ID should be unique across all
+	// nodes.
 	ID() string
+	// ParentIDs should return a slice of IDs that this node depends on, i.e.
+	// ["1", "2"].  There should be no cyclic references.
 	ParentIDs() []string
+	// Do should execute the node action and return an error.  If it returns
+	// [ErrIgnore], the error will be ignored, with the message in [ErrIgnore]
+	// (you can use the [NewErrIgnore] to initialise it). Any other error type
+	// will lead to worker and process termination.
 	Do() error
 }
 
-type Graph struct {
-	v []vertex
-	g *graph.Mutable
+// ErrProcess is a Process error.
+type ErrProcess struct {
+	// NodeID is a node ID that reported an error
+	NodeID string
+	// Err is an actual error, reported by a node.
+	Err error
+	// Worker is the id of the worker that reported this error.
+	Worker int
+	// Time when the error occurred.
+	Time time.Time
 }
 
-func NewGraph(nodes []Node) (Graph, error) {
-	var (
-		idx      = make(map[string]int, len(nodes))
-		vertices = make([]vertex, len(nodes))
-	)
-	for i := range nodes {
-		idx[nodes[i].ID()] = i
-		vertices[i] = vertex{
-			n: nodes[i],
-		}
-	}
-	// add vertex edges
-	g := graph.New(len(nodes))
-	for i := range nodes {
-		for _, parID := range nodes[i].ParentIDs() {
-			idxPar := idx[parID]
-			g.Add(idxPar, i)
-			vertices[idxPar].children = append(vertices[idxPar].children, &vertices[i])
-		}
-		vertices[i].setParentCount(len(nodes[i].ParentIDs()))
-	}
-	if !graph.Acyclic(g) {
-		return Graph{}, errors.New("graph is not acyclic")
-	}
-	return Graph{v: vertices, g: g}, nil
+func (ep *ErrProcess) Error() string {
+	return fmt.Sprintf("an error occurred at %s on worker: %d node: %s error: %s", ep.Time, ep.Worker, ep.NodeID, ep.Err)
 }
 
-func Process(n []Node, workers int) error {
-	g, err := NewGraph(n)
+// ErrIgnore should be returned by [Node] if the error should be ignored and the
+// process should continue running.  It can be instantiated with
+// [NewErrIgnore].
+type ErrIgnore string
+
+// NewErrIgnore instantiates a new [ErrIgnore] error.
+func NewErrIgnore(msg string) error {
+	return ErrIgnore(msg)
+}
+
+func (e ErrIgnore) Error() string {
+	return "process error (ignored): " + string(e)
+}
+
+// ErrNothingToDo is returned by [Process] if there are no Nodes.
+var ErrNothingToDo = errors.New("nothing to do")
+
+// Process processes a slice of nodes with requested number of workers.
+// workers defaults to defNumWorkers if 0 workers is requested.  If n does not
+// contain any nodes, Process returns [ErrNothingToDo].
+func Process(ctx context.Context, n []Node, numWorkers int) error {
+	if len(n) == 0 {
+		return ErrNothingToDo
+	}
+	if numWorkers <= 0 {
+		numWorkers = defNumWorkers
+	}
+	g, err := newPipeline(n)
 	if err != nil {
-		return err
+		return fmt.Errorf("error initialising DAG: %w", err)
 	}
 	order, ok := graph.TopSort(g.g)
 	if !ok {
-		log.Fatal("poop")
+		return errors.New("topological sort failed on the graph")
 	}
 
-	var vertexC = make(chan *vertex)
-	// start generator
+	var actionC = make(chan *action)
+	// start a generator
 	go func() {
-		defer close(vertexC)
+		defer close(actionC)
 		for _, idx := range order {
-			vertexC <- &g.v[idx]
+			actionC <- &g.v[idx]
 		}
 	}()
 
+	// start workers
 	var wg sync.WaitGroup
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
+	var errC = make(chan error, 1)
+	wg.Add(numWorkers)
+	for i := 0; i < numWorkers; i++ {
 		go func(i int) {
-			worker(context.Background(), i, vertexC)
+			worker(ctx, i, actionC, errC)
 			wg.Done()
 			fmt.Printf("worker %d exited\n", i)
 		}(i)
 	}
-	wg.Wait()
+	go func() {
+		wg.Wait()
+		close(errC)
+	}()
+	// process worker errors, if any.
+	for err := range errC {
+		if err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-type vertex struct {
-	n        Node
-	wg       sync.WaitGroup // waitgroup is prerequisites wait group
-	children []*vertex      // addresses of all child nodes
-}
-
-func (v *vertex) setParentCount(n int) {
-	log.Printf("node %s: set parent count: %d", v.n.ID(), n)
-	v.wg.Add(n)
-}
-
-func (v *vertex) reportOK(id string) {
-	log.Printf("node %s: parent %s reported OK", v.n.ID(), id)
-	v.wg.Done()
-}
-
-func worker(ctx context.Context, id int, vertexC <-chan *vertex) {
-	lg := log.New(os.Stdout, "worker "+strconv.Itoa(id)+": ", log.LstdFlags)
+// worker is the function that executes Node actions.  It receives actions on
+// actionC channel.  If an error occurs and it's not an ErrIgnore, it sends it
+// on errC and terminates.  If it is an ErrIgnore error, it logs it with the
+// context logger and continues execution.
+func worker(ctx context.Context, id int, actionC <-chan *action, errC chan<- error) {
+	lg := dlog.FromContext(ctx)
+	lg.SetPrefix("worker " + strconv.Itoa(id) + " ")
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case vertex, more := <-vertexC:
+		case action, more := <-actionC:
 			if !more {
 				return
 			}
-			lg.Println("waiting on dependencies", vertex.n.ID())
-			vertex.wg.Wait()
-			lg.Println("start:", vertex.n.ID(), "num children:", len(vertex.children))
-			if err := vertex.n.Do(); err != nil {
-				log.Printf("node: %s, error: %s", vertex.n.ID(), err)
+			lg.Debugln("waiting on dependencies of", action.n.ID())
+			action.Wait()
+			lg.Debugf("action id=%s: started, num children: %d", action.n.ID(), len(action.children))
+			if err := action.n.Do(); err != nil {
+				ep := &ErrProcess{NodeID: action.n.ID(), Worker: id, Err: err, Time: time.Now()}
+				// we got to return if it's not an "ignore" error.
+				if !isIgnoreError(err) {
+					lg.Debugf("worker %d exiting with error: %s", id, err)
+					errC <- ep
+					return
+				}
+				lg.Print(err)
 			}
-			lg.Println("finish:", vertex.n.ID())
-			for i := range vertex.children {
-				lg.Printf("notify %s that vertex %s is done", vertex.children[i].n.ID(), vertex.n.ID())
-				vertex.children[i].reportOK(vertex.n.ID()) // mark this prerequisite as done
+			lg.Debugln("finish:", action.n.ID())
+			for i := range action.children {
+				lg.Debugf("notify %s that action id=%s is done", action.children[i].n.ID(), action.n.ID())
+				action.children[i].DecParentCount(action.n.ID()) // mark this prerequisite as done
 			}
 		}
 	}
+}
+
+// isIgnoreError returns true if the err is ErrIgnore.
+func isIgnoreError(err error) bool {
+	var ei ErrIgnore
+	return errors.As(err, &ei)
 }
