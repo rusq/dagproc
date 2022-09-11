@@ -14,7 +14,7 @@ type action struct {
 
 // Wait blocks until all parent tasks are complete.
 func (v *action) Wait() {
-	dlog.Debugf("action id=%s: waiting for parent tasks to complete")
+	dlog.Debugf("action id=%s: waiting for parent tasks to complete", v.n.ID())
 	v.wg.Wait()
 }
 

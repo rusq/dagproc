@@ -16,6 +16,8 @@ import (
 const defNumWorkers = 1
 
 // A Node is a basic building block of a pipeline.
+//
+//go:generate mockgen -destination internal/mock_dagproc/mock_dagproc.go . Node
 type Node interface {
 	// ID should return an ID, i.e. "3".  ID should be unique across all
 	// nodes.
